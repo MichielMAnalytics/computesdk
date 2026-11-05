@@ -139,7 +139,7 @@ describe('config', () => {
     expect(m.create).not.toHaveBeenCalled();
   });
 
-  it('reads the key, org and region from the environment', async () => {
+  it('reads the key and region from the environment, and leaves the org to the key', async () => {
     vi.stubEnv('BOXD_API_KEY', 'bxd_env');
     vi.stubEnv('BOXD_ORG', 'env-org');
     vi.stubEnv('BOXD_REGION', 'fra');
@@ -147,7 +147,20 @@ describe('config', () => {
     m.waitUntilReady.mockResolvedValueOnce(machine({ region: 'fra' }));
     await boxd({}).instances.create();
     expect(clientOptions.at(-1)).toMatchObject({ apiKey: 'bxd_env', region: 'fra' });
-    expect(m.create.mock.calls[0][0]).toMatchObject({ org: 'env-org', region: 'fra' });
+    expect(m.create.mock.calls[0][0]).toMatchObject({ region: 'fra' });
+    // A key belongs to one org; naming it would keep the SDK from going straight to the region.
+    expect(m.create.mock.calls[0][0]).not.toHaveProperty('org');
+  });
+
+  it('sends the org with a session token, which can reach several orgs', async () => {
+    vi.stubEnv('BOXD_ORG', 'env-org');
+    m.create.mockResolvedValueOnce(machine());
+    m.waitUntilReady.mockResolvedValueOnce(machine());
+    const withToken = boxd({ token: 'tok_org' });
+    await withToken.instances.create();
+    await withToken.instances.list();
+    expect(m.create.mock.calls[0][0]).toMatchObject({ org: 'env-org' });
+    expect(m.list).toHaveBeenCalledWith({ org: 'env-org', region: 'all', labels: { computesdk: 'true' } });
   });
 
   it('uses a key passed in over a BOXD_TOKEN in the environment', async () => {
@@ -195,7 +208,9 @@ describe('create', () => {
   it('creates an isolated, labelled computer and waits until it is ready', async () => {
     const { sandbox, id } = await created();
     const params = m.create.mock.calls[0][0];
-    expect(params).toMatchObject({ org: 'acme', isolated: true, labels: { computesdk: 'true' } });
+    expect(params).toMatchObject({ isolated: true, labels: { computesdk: 'true' } });
+    // `org` is configured, but an API key decides the org itself.
+    expect(params).not.toHaveProperty('org');
     expect(params.name).toMatch(/^computesdk-[0-9a-f]{8}$/);
     expect(m.waitUntilReady).toHaveBeenCalledWith(id, { region: 'nyc' });
     expect(sandbox.instanceId).toBe(id);
@@ -293,8 +308,11 @@ describe('create', () => {
     const refused = new AuthenticationError('invalid token');
     m.create.mockRejectedValueOnce(refused);
     const err = (await provider().instances.create().catch((e: unknown) => e)) as Error & { cause?: unknown };
-    expect(err.message).toMatch(/rejected the credentials .* BOXD_ORG/);
+    expect(err.message).toBe('boxd rejected the credentials (invalid token). Check BOXD_API_KEY.');
     expect(err.cause).toBe(refused);
+    m.create.mockRejectedValueOnce(new AuthenticationError('invalid token'));
+    const withToken = (await boxd({ token: 'tok_refused', org: 'acme' }).instances.create().catch((e: unknown) => e)) as Error;
+    expect(withToken.message).toMatch(/Check BOXD_TOKEN, and that BOXD_ORG is an org it can use/);
   });
 
   it('reports standard size classes as unsupported', async () => {
@@ -314,7 +332,7 @@ describe('lookup', () => {
     const b = machine({ region: 'fra' });
     m.list.mockResolvedValueOnce(regional([a, b]));
     const all = await provider().instances.list();
-    expect(m.list).toHaveBeenCalledWith({ org: 'acme', region: 'all', labels: { computesdk: 'true' } });
+    expect(m.list).toHaveBeenCalledWith({ region: 'all', labels: { computesdk: 'true' } });
     expect(all.map((s) => s.instanceId)).toEqual([a.id, b.id]);
   });
 
@@ -323,8 +341,8 @@ describe('lookup', () => {
     await provider({ region: 'fra' }).instances.list();
     await provider({ region: 'fra' }).snapshot!.list();
     await provider({ region: 'fra' }).volume!.list();
-    expect(m.list).toHaveBeenCalledWith({ org: 'acme', region: 'fra', labels: { computesdk: 'true' } });
-    expect(snapshots.list).toHaveBeenCalledWith({ org: 'acme', region: 'fra' });
+    expect(m.list).toHaveBeenCalledWith({ region: 'fra', labels: { computesdk: 'true' } });
+    expect(snapshots.list).toHaveBeenCalledWith({ region: 'fra' });
     expect(disks.list).toHaveBeenCalledWith({ region: 'fra' });
   });
 
@@ -633,6 +651,45 @@ describe('volumes', () => {
     expect(m.exec.mock.calls[0][1].command).toBe(`for p in '/data'; do mountpoint -q "$p" || echo "$p"; done`);
   });
 
+  // boxd can fail a computer at boot while the disk's last computer is still letting go of it.
+  const bootFailure = (name: string) => new BoxdError(`machine ${name} entered terminal state 'failed' while waiting`);
+
+  it('makes a computer with volumes again when it failed at boot', async () => {
+    const [failed, good] = [machine(), machine()];
+    disks.list.mockResolvedValueOnce(regional([disk()]));
+    m.create.mockResolvedValueOnce(failed).mockResolvedValueOnce(good);
+    m.waitUntilReady.mockRejectedValueOnce(bootFailure(failed.name)).mockResolvedValueOnce(good);
+    m.exec.mockResolvedValueOnce(ok(''));
+    const sandbox = await provider().instances.create({ volumes: [{ volume: 'cache', mountPath: '/data' }] });
+    expect(sandbox.instanceId).toBe(good.id);
+    expect(m.delete).toHaveBeenCalledWith(failed.id, { region: 'nyc' });
+    expect(m.create.mock.calls[1][0]).toMatchObject({ config: { volumes: [{ diskId: 'd-1', mountPath: '/data' }] } });
+  });
+
+  it('gives up after four boot failures, with an error the factory does not retry', async () => {
+    disks.list.mockResolvedValueOnce(regional([disk()]));
+    for (let i = 0; i < 4; i++) {
+      const mach = machine();
+      m.create.mockResolvedValueOnce(mach);
+      m.waitUntilReady.mockRejectedValueOnce(bootFailure(mach.name));
+    }
+    const err = (await provider()
+      .instances.create({ volumes: [{ volume: 'cache', mountPath: '/data' }] })
+      .catch((e: unknown) => e)) as Error;
+    expect(err.message).toMatch(/terminal state 'failed' while waiting, 4 times in a row/);
+    expect(err.message).not.toMatch(RETRIED);
+    expect(m.create).toHaveBeenCalledTimes(4);
+    expect(m.delete).toHaveBeenCalledTimes(4);
+  });
+
+  it('does not make a computer without volumes again when it failed at boot', async () => {
+    const mach = machine();
+    m.create.mockResolvedValueOnce(mach);
+    m.waitUntilReady.mockRejectedValueOnce(bootFailure(mach.name));
+    await expect(provider().instances.create()).rejects.toThrow("terminal state 'failed'");
+    expect(m.create).toHaveBeenCalledTimes(1);
+  });
+
   it('fails the create, and deletes the computer, when a volume did not mount', async () => {
     const mach = machine();
     disks.list.mockResolvedValueOnce(regional([disk()]));
@@ -793,7 +850,7 @@ describe('regions and "not found"', () => {
     m.delete.mockRejectedValueOnce(notFound()).mockResolvedValueOnce(undefined);
     m.list.mockResolvedValueOnce(regional([machine({ id: 'fra-1', region: 'fra' })]));
     await provider().instances.destroy('fra-1');
-    expect(m.list).toHaveBeenCalledWith({ org: 'acme', region: 'all' });
+    expect(m.list).toHaveBeenCalledWith({ region: 'all' });
     expect(m.delete).toHaveBeenNthCalledWith(1, 'fra-1', { region: 'nyc' });
     expect(m.delete).toHaveBeenNthCalledWith(2, 'fra-1', { region: 'fra' });
   });
@@ -850,7 +907,7 @@ describe('regions and "not found"', () => {
     m.waitUntilReady.mockResolvedValueOnce(machine({ id: 'r-1', region: 'fra' }));
     await provider().instances.create({ snapshotId: 'snap-fra' });
     expect(m.create.mock.calls[0][0]).toMatchObject({ fromSnapshot: 'snap-fra', region: 'nyc' });
-    expect(snapshots.list).toHaveBeenCalledWith({ org: 'acme', region: 'all' });
+    expect(snapshots.list).toHaveBeenCalledWith({ region: 'all' });
     expect(m.create.mock.calls[1][0]).toMatchObject({ fromSnapshot: 'snap-fra', region: 'fra' });
   });
 
@@ -865,8 +922,8 @@ describe('regions and "not found"', () => {
     snapshots.delete.mockRejectedValueOnce(new NotFoundError('snapshot not found', 5)).mockResolvedValueOnce(undefined);
     snapshots.list.mockResolvedValueOnce(regional([{ id: 'snap-fra', name: 'golden', region: 'fra' }]));
     await provider().snapshot!.delete('snap-fra');
-    expect(snapshots.delete).toHaveBeenNthCalledWith(1, 'snap-fra', { org: 'acme', region: 'nyc' });
-    expect(snapshots.delete).toHaveBeenLastCalledWith('snap-fra', { org: 'acme', region: 'fra' });
+    expect(snapshots.delete).toHaveBeenNthCalledWith(1, 'snap-fra', { region: 'nyc' });
+    expect(snapshots.delete).toHaveBeenLastCalledWith('snap-fra', { region: 'fra' });
   });
 });
 
@@ -899,7 +956,7 @@ describe('snapshots', () => {
     );
     const mine = await provider().snapshot!.list({ instanceId: 'abcdef12-0000-0000-0000-000000000000' });
     expect(mine.map((s) => s.id)).toEqual(['s-1', 's-3']);
-    expect(snapshots.list).toHaveBeenCalledWith({ org: 'acme', region: 'all' });
+    expect(snapshots.list).toHaveBeenCalledWith({ region: 'all' });
     expect((await provider().snapshot!.list({ limit: 2 })).map((s) => s.id)).toEqual(['s-1', 's-2']);
   });
 });

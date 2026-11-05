@@ -35,14 +35,13 @@ npm install @computesdk/boxd
 ## Setup
 
 1. Create an API key in the [boxd console](https://app.boxd.sh), or with the CLI: `boxd auth keys create computesdk --org <your-org>`
-2. Set the environment variables:
+2. Set the environment variable:
 
 ```bash
 export BOXD_API_KEY=bxd_your_api_key
-export BOXD_ORG=your-org
 ```
 
-`BOXD_ORG` is the org the key belongs to. A key or token passed in the config wins over `BOXD_TOKEN` and `BOXD_API_KEY` in the environment.
+A key belongs to one org, so nothing else is needed. With a session token (`BOXD_TOKEN`) instead of a key, set `BOXD_ORG` to pick the org. A key or token passed in the config wins over `BOXD_TOKEN` and `BOXD_API_KEY` in the environment.
 
 New computers and volumes go to New York (`nyc`). For Frankfurt, set `BOXD_REGION=fra` or pass `region: 'fra'`.
 
@@ -53,7 +52,7 @@ import { compute } from 'computesdk';
 import { boxd } from '@computesdk/boxd';
 
 compute.setConfig({
-  provider: boxd({ apiKey: process.env.BOXD_API_KEY, org: process.env.BOXD_ORG }),
+  provider: boxd({ apiKey: process.env.BOXD_API_KEY }),
 });
 
 const sandbox = await compute.instances.create();
@@ -69,7 +68,7 @@ Or call the provider factory directly:
 ```typescript
 import { boxd } from '@computesdk/boxd';
 
-const sdk = boxd({ apiKey: process.env.BOXD_API_KEY, org: process.env.BOXD_ORG });
+const sdk = boxd({ apiKey: process.env.BOXD_API_KEY });
 const sandbox = await sdk.instances.create({ vcpus: 4, timeout: 60 * 60 * 1000 });
 
 // Save the computer as it is, then start new ones from it
@@ -110,7 +109,7 @@ interface BoxdConfig {
   apiKey?: string;
   /** boxd session token, used instead of an API key - defaults to BOXD_TOKEN */
   token?: string;
-  /** Org to create and list computers in - defaults to BOXD_ORG */
+  /** Org to work in with a session token - defaults to BOXD_ORG. Not needed with an API key, which belongs to one org. */
   org?: string;
   /** Region for new computers and volumes: `nyc` (New York) or `fra` (Frankfurt) - defaults to BOXD_REGION, then `nyc`. Lists cover every region unless it is set. */
   region?: string;

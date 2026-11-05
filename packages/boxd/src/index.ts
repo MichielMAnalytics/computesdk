@@ -42,7 +42,7 @@ export interface BoxdConfig {
   apiKey?: string;
   /** boxd session token, used instead of an API key - falls back to BOXD_TOKEN */
   token?: string;
-  /** Org (name or id) to create and list computers in - falls back to BOXD_ORG. An API key belongs to one org already. */
+  /** Org (name or id) to work in with a session token - falls back to BOXD_ORG. An API key belongs to one org, so with a key it isn't sent. */
   org?: string;
   /** Region for new computers and volumes: `nyc` (New York) or `fra` (Frankfurt) - falls back to BOXD_REGION, then `nyc`. Lists cover every region unless it is set. */
   region?: string;
@@ -127,9 +127,12 @@ const DAEMON_EVENTS_PORT = 38989;
 const STREAM_CLOSE_GRACE_MS = 2_000;
 /** How long a disk gets to show up mounted once its computer is ready. */
 const MOUNT_WAIT_MS = 5_000;
+/** Pauses before making a computer with volumes again when it failed at boot (see `create`). */
+const DISK_RETRY_MS = [500, 1000, 2000];
 
 interface ResolvedConfig {
   credential: { token: string } | { apiKey: string };
+  /** The org calls name: the configured one with a session token, none with an API key. */
   org?: string;
   /** Where new computers and volumes go: `pinned`, else DEFAULT_REGION on boxd itself. */
   region?: string;
@@ -170,7 +173,10 @@ function resolveConfig(config: BoxdConfig): ResolvedConfig {
   const baseURL = config.baseURL || env?.BOXD_BASE_URL || undefined;
   return {
     credential,
-    org: config.org || env?.BOXD_ORG || undefined,
+    // An API key belongs to one org, which boxd applies itself. The SDK sends a call that
+    // names no org straight to its region, and naming the org made bursts of creates several
+    // times slower, so only a session token, which can reach several orgs, sends it.
+    org: 'token' in credential ? config.org || env?.BOXD_ORG || undefined : undefined,
     // A server of your own, such as a dev cluster, may run a single region by another name.
     region: pinned ?? (baseURL ? undefined : DEFAULT_REGION),
     pinned,
@@ -377,9 +383,8 @@ async function createMachine(client: Boxd, config: ResolvedConfig, params: Machi
     return await client.machines.create(params);
   } catch (err) {
     if (err instanceof AuthenticationError) {
-      const rejected = new Error(
-        `boxd rejected the credentials (${err.message}). Check BOXD_API_KEY and that BOXD_ORG is the org the key belongs to.`,
-      );
+      const check = 'token' in config.credential ? 'BOXD_TOKEN, and that BOXD_ORG is an org it can use' : 'BOXD_API_KEY';
+      const rejected = new Error(`boxd rejected the credentials (${err.message}). Check ${check}.`);
       (rejected as Error & { cause?: unknown }).cause = err;
       throw rejected;
     }
@@ -673,6 +678,11 @@ function createParams(config: ResolvedConfig, options: CreateInstanceOptions, pl
   return fromSnapshot ? { ...common, fromSnapshot } : common;
 }
 
+/** Whether a new computer went to 'failed' instead of starting, as the SDK's waitUntilReady reports it. */
+function failedAtBoot(err: unknown): boolean {
+  return err instanceof BoxdError && /terminal state 'failed'/.test(err.message);
+}
+
 function isStopped(err: unknown): boolean {
   return err instanceof ConflictError && /is stopped/i.test(err.message);
 }
@@ -865,28 +875,44 @@ export const boxd = defineProvider<BoxdInstance, BoxdConfig, unknown, Snapshot, 
         const client = clientFor(resolved);
         const envs = stringEnvs(options.envs);
         const place = await placement(client, resolved, options);
-        const machine = await createMachine(client, resolved, createParams(resolved, options, place), place.chosen);
-        remember(machine);
-        createdHere.set(machine.id, Date.now());
-        hasDisks.set(machine.id, place.volumes.length > 0);
-        const instance = toInstance(client, resolved, machine, envs);
-        try {
-          // create returns before the computer takes commands; waitUntilReady covers the gap.
-          instance.machine = await onComputer(client, resolved.org, instance, () =>
-            client.machines.waitUntilReady(machine.id, regionOpt(instance.region)),
-          );
-          if (place.volumes.length > 0) await checkMounts(instance, place.volumes);
-          if (Object.keys(envs).length > 0) await writeEnvFile(instance, envs);
-        } catch (err) {
-          await deleteComputer(client, resolved.org, instance).catch((cleanup: Error) => {
-            throw new Error(
-              `boxd computer ${machine.name} (${machine.id}) failed to start (${(err as Error).message}) ` +
-                `and could not be deleted (${cleanup.message}). Delete it with \`boxd machine destroy ${machine.name}\`.`,
+        for (let attempt = 0; ; attempt++) {
+          const machine = await createMachine(client, resolved, createParams(resolved, options, place), place.chosen);
+          remember(machine);
+          createdHere.set(machine.id, Date.now());
+          hasDisks.set(machine.id, place.volumes.length > 0);
+          const instance = toInstance(client, resolved, machine, envs);
+          try {
+            // create returns before the computer takes commands; waitUntilReady covers the gap.
+            instance.machine = await onComputer(client, resolved.org, instance, () =>
+              client.machines.waitUntilReady(machine.id, regionOpt(instance.region)),
             );
-          });
-          throw err;
+            if (place.volumes.length > 0) await checkMounts(instance, place.volumes);
+            if (Object.keys(envs).length > 0) await writeEnvFile(instance, envs);
+            return { instance, instanceId: machine.id };
+          } catch (err) {
+            await deleteComputer(client, resolved.org, instance).catch((cleanup: Error) => {
+              throw new Error(
+                `boxd computer ${machine.name} (${machine.id}) failed to start (${(err as Error).message}) ` +
+                  `and could not be deleted (${cleanup.message}). Delete it with \`boxd machine destroy ${machine.name}\`.`,
+              );
+            });
+            // A computer created right after the last one to run with its disk was destroyed can
+            // fail at boot until boxd has let go of the disk, so it is made again a moment later.
+            if (place.volumes.length > 0 && failedAtBoot(err)) {
+              if (attempt < DISK_RETRY_MS.length) {
+                await sleep(DISK_RETRY_MS[attempt]);
+                continue;
+              }
+              // The factory retries an error that reads like a disk still in use elsewhere; this
+              // one has been retried already, so it keeps clear of those words.
+              throw new Error(
+                `${(err as Error).message}, ${attempt + 1} times in a row. A computer created right after the last one ` +
+                  `to run with its disk was destroyed can fail like this until boxd lets go of the disk.`,
+              );
+            }
+            throw err;
+          }
         }
-        return { instance, instanceId: machine.id };
       },
 
       getById: async (config: BoxdConfig, instanceId: string) => {

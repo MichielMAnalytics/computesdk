@@ -86,7 +86,7 @@ Install provider packages and pass instances into `compute.setConfig`:
 | **AWS EC2** | `AWS_REGION` + AWS SDK credential chain (or a `credentials` provider) | On-demand or Spot instances from a launch template; commands over SSM |
 | **Beam** | `BEAM_TOKEN`, `BEAM_WORKSPACE_ID` | Serverless cloud sandboxes |
 | **Blaxel** | `BL_API_KEY`, `BL_WORKSPACE` | Agent sandboxes with custom images |
-| **boxd** | `BOXD_API_KEY`, `BOXD_ORG` | Isolated microVM computers that boot in milliseconds, snapshots, volumes, HTTPS URLs for any port |
+| **boxd** | `BOXD_API_KEY` | Isolated microVM computers that boot in milliseconds, snapshots, volumes, HTTPS URLs for any port |
 | **Brezel** | `BREZEL_API_KEY`, `BREZEL_API_URL`, `BREZEL_PROJECT_ID`, `BREZEL_ENVIRONMENT_REVISION` | Self-hosted Firecracker sandboxes |
 | **Cloud Run** | `CLOUD_RUN_SANDBOX_URL`, `CLOUD_RUN_SANDBOX_SECRET` | Google Cloud Run sandboxes |
 | **Cloudflare** | `CLOUDFLARE_SANDBOX_URL`, `CLOUDFLARE_SANDBOX_API_KEY` | Edge computing |
