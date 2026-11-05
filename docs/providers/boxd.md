@@ -44,6 +44,8 @@ export BOXD_ORG=your-org
 
 `BOXD_ORG` is the org the key belongs to. A key or token passed in the config wins over `BOXD_TOKEN` and `BOXD_API_KEY` in the environment.
 
+New computers and volumes go to New York (`nyc`). For Frankfurt, set `BOXD_REGION=fra` or pass `region: 'fra'`.
+
 ## Quick Start
 
 ```typescript
@@ -96,7 +98,7 @@ console.log((await second.runCommand('cat /data/note')).stdout); // kept
 const sandbox = await sdk.instances.create({ ports: [3000] });
 await sandbox.runCommand('python3 -m http.server 3000', { background: true });
 
-// https://p3000.<name>.boxd.sh, already answering when getUrl returns
+// https://p3000.<name>.nyc.boxd.sh, already answering when getUrl returns
 const url = await sandbox.getUrl({ port: 3000 });
 ```
 
@@ -110,7 +112,7 @@ interface BoxdConfig {
   token?: string;
   /** Org to create and list computers in - defaults to BOXD_ORG */
   org?: string;
-  /** Region to create in, e.g. `fra` or `nyc` - defaults to BOXD_REGION, then Frankfurt. Lists cover every region unless it is set. */
+  /** Region for new computers and volumes: `nyc` (New York) or `fra` (Frankfurt) - defaults to BOXD_REGION, then `nyc`. Lists cover every region unless it is set. */
   region?: string;
   /** API endpoint - defaults to BOXD_BASE_URL, then boxd production */
   baseURL?: string;
@@ -133,7 +135,7 @@ interface BoxdConfig {
 | `memoryMiB` (or `memory`, `memoryMb`, `memMiB`) | `config.memory` | 4096, 8192, 16384 or 32768. Every vCPU comes with 4 GiB, so either field names the whole size. |
 | `snapshotId` (or `templateId`) | `fromSnapshot` | Starts as the snapshot was captured, with its size, in the snapshot's region. |
 | `timeout` | `deleteAfter` | Milliseconds until the computer is deleted, whatever it is doing. |
-| `region` | `region` | `fra` (default) or another region your org has, such as `nyc`. |
+| `region` | `region` | `nyc` or `fra`, for this computer only. Defaults to the config's `region`, then `nyc`. |
 | `volumes` | `config.volumes` | `[{ volume, mountPath, readOnly? }]`. boxd places the computer next to its disks, so they must share a region. |
 | `ports` | `config.proxies` | A named route per port from the start, so its certificate is issued while the computer boots. |
 | `envs` | | Stored in the computer (`~/.computesdk/env`, readable by its user only) and read by every command, also after `getById`. A snapshot of the computer keeps them. |
@@ -152,7 +154,7 @@ interface BoxdConfig {
 - **Port URLs**: `getUrl({ port })` returns `https://p<port>.<name>.<zone>` once it answers: a computer's first URL waits about 20 seconds for its certificate, a later one about a second. An existing named route on the port is reused, and `ws`/`wss` give a `wss://` URL. Port URLs are public.
 - **Snapshots**: `snapshot.create` (it waits for the version it captured), `list` and `delete`, and `create({ snapshotId })`. `snapshot.list({ instanceId })` returns the snapshots this provider named for that computer; boxd doesn't link a snapshot you named yourself to the computer it came from.
 - **Volumes**: `volume.create`, `get`, `list` and `delete` on boxd disks (ext4, 10 GiB unless `sizeBytes` says otherwise), mounted with `create({ volumes })` or `attachVolume`. `create` checks that every volume mounted. boxd mounts and releases a computer's disks when it boots, so `attachVolume` and `detachVolume` restart a running computer. Before the provider stops or destroys a computer, its disks are written out and left clean, so a file written just before is kept and the next read-only mount works.
-- **Regions**: `getById`, `destroy` and the snapshot calls find a computer or snapshot in any region of the org
+- **Regions**: new computers and volumes go to New York (`nyc`) unless `region` or `BOXD_REGION` names another, such as Frankfurt (`fra`). `getById`, `destroy` and the snapshot calls find a computer or snapshot in any region of the org.
 - **Persistence**: a computer keeps its disk until you destroy it, and a stopped one is started again by the next command
 
 ## Limitations

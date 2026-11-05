@@ -44,9 +44,9 @@ export interface BoxdConfig {
   token?: string;
   /** Org (name or id) to create and list computers in - falls back to BOXD_ORG. An API key belongs to one org already. */
   org?: string;
-  /** Region to create computers in (e.g. `fra`, `nyc`) - falls back to BOXD_REGION, then the boxd default (Frankfurt). Lists cover every region unless it is set. */
+  /** Region for new computers and volumes: `nyc` (New York) or `fra` (Frankfurt) - falls back to BOXD_REGION, then `nyc`. Lists cover every region unless it is set. */
   region?: string;
-  /** API endpoint - falls back to BOXD_BASE_URL, then boxd production */
+  /** API endpoint - falls back to BOXD_BASE_URL, then boxd production. On a server of your own, computers go to its home region unless `region` is set. */
   baseURL?: string;
   /** Default lifetime of a computer in milliseconds, for a create that passes no `timeout`. Unset: a computer lives until it is destroyed. */
   timeout?: number;
@@ -92,6 +92,8 @@ const SIZES: ReadonlyArray<{ vcpu: number; memoryGiB: number }> = [
   { vcpu: 8, memoryGiB: 32 },
 ];
 const SIZE_LIST = SIZES.map((s) => `${s.vcpu} vCPU / ${s.memoryGiB} GiB`).join(', ');
+/** Where new computers and volumes go when neither the config nor BOXD_REGION names a region. */
+const DEFAULT_REGION = 'nyc';
 const LABEL = { computesdk: 'true' } as const;
 const SNAPSHOT_READY_TIMEOUT_MS = 120_000;
 /** Snapshot names this provider makes start with this, then the computer's id (see `snapshot.list`). */
@@ -129,13 +131,20 @@ const MOUNT_WAIT_MS = 5_000;
 interface ResolvedConfig {
   credential: { token: string } | { apiKey: string };
   org?: string;
+  /** Where new computers and volumes go: `pinned`, else DEFAULT_REGION on boxd itself. */
   region?: string;
+  /** The region the config or BOXD_REGION names. Lists stay in it, and a computer isn't moved out of it to its volumes' or snapshot's region. */
+  pinned?: string;
   baseURL?: string;
   timeout?: number;
   requestTimeout?: number;
   autoSuspendTimeout?: number;
   urlReadyTimeout: number;
 }
+
+/** A region id as boxd writes it, or undefined for none. */
+const regionName = (value: unknown): string | undefined =>
+  typeof value === 'string' && value.trim() ? value.trim().toLowerCase() : undefined;
 
 const clients = new Map<string, Boxd>();
 
@@ -157,11 +166,15 @@ function resolveConfig(config: BoxdConfig): ResolvedConfig {
         `Create one with \`boxd auth keys create <name> --org <org>\` or in the console at https://app.boxd.sh`,
     );
   }
+  const pinned = regionName(config.region) ?? regionName(env?.BOXD_REGION);
+  const baseURL = config.baseURL || env?.BOXD_BASE_URL || undefined;
   return {
     credential,
     org: config.org || env?.BOXD_ORG || undefined,
-    region: config.region || env?.BOXD_REGION || undefined,
-    baseURL: config.baseURL || env?.BOXD_BASE_URL || undefined,
+    // A server of your own, such as a dev cluster, may run a single region by another name.
+    region: pinned ?? (baseURL ? undefined : DEFAULT_REGION),
+    pinned,
+    baseURL,
     timeout: config.timeout,
     requestTimeout: config.requestTimeout,
     autoSuspendTimeout: config.autoSuspendTimeout,
@@ -253,8 +266,8 @@ async function locateSnapshot(client: Boxd, org: string | undefined, idOrName: s
  * Runs `call` against one computer and decides what a "not found" means, since boxd
  * answers it in two cases where the computer exists:
  *
- * - The computer is in another region than `target.region`: one created with a per-call
- *   `region`, looked up by id. The listing names its region, and the call goes there.
+ * - The computer is in another region than `target.region`, the configured one, when it is
+ *   looked up by id. The listing names its region, and the call goes there.
  * - boxd answers "not found" for a moment about a computer it has just created. The call
  *   is retried for a few seconds, unless the listing agrees that the computer is gone.
  *
@@ -359,7 +372,7 @@ async function deleteComputer(client: Boxd, org: string | undefined, target: { i
   forget(target.id);
 }
 
-async function createMachine(client: Boxd, config: ResolvedConfig, params: MachineCreateParams): Promise<Machine> {
+async function createMachine(client: Boxd, config: ResolvedConfig, params: MachineCreateParams, chosen: boolean): Promise<Machine> {
   try {
     return await client.machines.create(params);
   } catch (err) {
@@ -370,10 +383,10 @@ async function createMachine(client: Boxd, config: ResolvedConfig, params: Machi
       (rejected as Error & { cause?: unknown }).cause = err;
       throw rejected;
     }
-    // A snapshot is kept in the region of the computer it was taken from.
-    if (err instanceof NotFoundError && params.fromSnapshot && !params.region) {
+    // A snapshot is kept in the region of the computer it was taken from, which beats the default.
+    if (err instanceof NotFoundError && params.fromSnapshot && !chosen) {
       const region = await locateSnapshot(client, config.org, params.fromSnapshot).catch(() => undefined);
-      if (region) return client.machines.create({ ...params, region });
+      if (region && region !== params.region) return client.machines.create({ ...params, region });
     }
     throw err;
   }
@@ -534,42 +547,53 @@ async function requireDisk(client: Boxd, region: string | undefined, ref: string
   return disk;
 }
 
+interface Placement {
+  volumes: Mount[];
+  region?: string;
+  /** Whether the region was asked for or follows the volumes, rather than being the default. */
+  chosen: boolean;
+}
+
 /**
- * `create({ volumes })` as boxd's `config.volumes`. A disk lives on one host, so boxd places
- * the computer next to its disks, which therefore must share a region. boxd's own
- * `{ diskId, mountPath, readOnly }` shape passes through.
+ * Where a new computer goes, and `create({ volumes })` as boxd's `config.volumes`. A region
+ * named at create or in the config is kept. Otherwise a computer with volumes goes to their
+ * region, since boxd places it next to its disks, and one without goes to the default.
+ * boxd's own `{ diskId, mountPath, readOnly }` shape passes through.
  */
-async function resolveMounts(client: Boxd, config: ResolvedConfig, options: CreateInstanceOptions): Promise<{ volumes: Mount[]; region?: string }> {
-  const requested = typeof options.region === 'string' ? options.region : config.region;
+async function placement(client: Boxd, config: ResolvedConfig, options: CreateInstanceOptions): Promise<Placement> {
+  const requested = regionName(options.region) ?? config.pinned;
+  const settle = (volumes: Mount[], disks: Array<Disk | undefined>): Placement => {
+    const regions = new Set(disks.flatMap((disk) => (disk?.region ? [disk.region] : [])));
+    if (regions.size > 1) throw new Error(`a boxd computer can only use volumes from one region; these are in ${[...regions].join(' and ')}`);
+    const diskRegion = [...regions][0];
+    if (requested && diskRegion && requested !== diskRegion) {
+      throw new Error(`the volumes are in ${diskRegion}, so the computer has to be created there, not in ${requested}`);
+    }
+    const region = requested ?? diskRegion;
+    return { volumes, region: region ?? config.region, chosen: region !== undefined };
+  };
   const mounts: unknown = options.volumes;
-  if (mounts === undefined || (Array.isArray(mounts) && mounts.length === 0)) return { volumes: [], region: requested };
-  if (!isUnifiedVolumeMounts(mounts)) {
-    const native = Array.isArray(mounts) && mounts.every((m) => m && typeof m.diskId === 'string' && typeof m.mountPath === 'string');
-    if (!native) throw new Error('volumes must be [{ volume, mountPath, readOnly? }]');
-    return {
-      volumes: (mounts as Array<{ diskId: string; mountPath: string; readOnly?: boolean }>).map((m) => ({
-        diskId: m.diskId,
-        mountPath: m.mountPath,
-        readOnly: m.readOnly === true,
-      })),
-      region: requested,
-    };
+  if (mounts === undefined || (Array.isArray(mounts) && mounts.length === 0)) return settle([], []);
+  if (isUnifiedVolumeMounts(mounts)) {
+    const disks = await listDisks(client, config.pinned);
+    const found = mounts.map((mount) => {
+      const disk = matchDisk(disks, mount.volume);
+      if (!disk) throw noVolume(mount.volume, config.pinned);
+      return disk;
+    });
+    const volumes = mounts.map((mount, i) => ({ diskId: found[i].id, mountPath: mount.mountPath, readOnly: mount.readOnly === true }));
+    return settle(volumes, found);
   }
-  const disks = await listDisks(client, config.region);
-  const volumes: Mount[] = [];
-  const regions = new Set<string>();
-  for (const mount of mounts) {
-    const disk = matchDisk(disks, mount.volume);
-    if (!disk) throw noVolume(mount.volume, config.region);
-    if (disk.region) regions.add(disk.region);
-    volumes.push({ diskId: disk.id, mountPath: mount.mountPath, readOnly: mount.readOnly === true });
-  }
-  if (regions.size > 1) throw new Error(`a boxd computer can only use volumes from one region; these are in ${[...regions].join(' and ')}`);
-  const diskRegion = [...regions][0];
-  if (requested && diskRegion && requested !== diskRegion) {
-    throw new Error(`the volumes are in ${diskRegion}, so the computer has to be created there, not in ${requested}`);
-  }
-  return { volumes, region: requested ?? diskRegion };
+  const native = Array.isArray(mounts) && mounts.every((m) => m && typeof m.diskId === 'string' && typeof m.mountPath === 'string');
+  if (!native) throw new Error('volumes must be [{ volume, mountPath, readOnly? }]');
+  const volumes = (mounts as Array<{ diskId: string; mountPath: string; readOnly?: boolean }>).map((m) => ({
+    diskId: m.diskId,
+    mountPath: m.mountPath,
+    readOnly: m.readOnly === true,
+  }));
+  // Their disks are looked up only for their region; one the listing lacks is left to boxd.
+  const disks = requested ? [] : await listDisks(client, undefined);
+  return settle(volumes, volumes.map((volume) => disks.find((disk) => disk.id === volume.diskId)));
 }
 
 /** The paths among `paths` that aren't mounted, given up to MOUNT_WAIT_MS to appear. */
@@ -617,7 +641,7 @@ async function readyDisk(client: Boxd, id: string, region: string | undefined): 
   }
 }
 
-function createParams(config: ResolvedConfig, options: CreateInstanceOptions, mounts: { volumes: Mount[]; region?: string }): MachineCreateParams {
+function createParams(config: ResolvedConfig, options: CreateInstanceOptions, place: Placement): MachineCreateParams {
   if (options.image) {
     throw new Error(
       `boxd computers boot from the boxd base image (Ubuntu 24.04 with Docker, Node, Python and Go). ` +
@@ -633,14 +657,14 @@ function createParams(config: ResolvedConfig, options: CreateInstanceOptions, mo
   const machineConfig: MachineConfig = {
     ...(size ?? {}),
     ...(config.autoSuspendTimeout !== undefined ? { autoSuspendTimeout: config.autoSuspendTimeout } : {}),
-    ...(mounts.volumes.length > 0 ? { volumes: mounts.volumes } : {}),
+    ...(place.volumes.length > 0 ? { volumes: place.volumes } : {}),
     ...(routes.length > 0 ? { proxies: routes } : {}),
   };
   const lifetime = typeof options.timeout === 'number' ? options.timeout : config.timeout;
   const common = {
     name: options.name || `computesdk-${randomSuffix()}`,
     ...(config.org ? { org: config.org } : {}),
-    ...regionOpt(mounts.region),
+    ...regionOpt(place.region),
     isolated: true,
     labels: { ...metadataLabels(options.metadata), ...LABEL },
     ...(typeof lifetime === 'number' && lifetime > 0 ? { deleteAfter: Math.ceil(lifetime / 1000) } : {}),
@@ -840,18 +864,18 @@ export const boxd = defineProvider<BoxdInstance, BoxdConfig, unknown, Snapshot, 
         const resolved = resolveConfig(config);
         const client = clientFor(resolved);
         const envs = stringEnvs(options.envs);
-        const mounts = await resolveMounts(client, resolved, options);
-        const machine = await createMachine(client, resolved, createParams(resolved, options, mounts));
+        const place = await placement(client, resolved, options);
+        const machine = await createMachine(client, resolved, createParams(resolved, options, place), place.chosen);
         remember(machine);
         createdHere.set(machine.id, Date.now());
-        hasDisks.set(machine.id, mounts.volumes.length > 0);
+        hasDisks.set(machine.id, place.volumes.length > 0);
         const instance = toInstance(client, resolved, machine, envs);
         try {
           // create returns before the computer takes commands; waitUntilReady covers the gap.
           instance.machine = await onComputer(client, resolved.org, instance, () =>
             client.machines.waitUntilReady(machine.id, regionOpt(instance.region)),
           );
-          if (mounts.volumes.length > 0) await checkMounts(instance, mounts.volumes);
+          if (place.volumes.length > 0) await checkMounts(instance, place.volumes);
           if (Object.keys(envs).length > 0) await writeEnvFile(instance, envs);
         } catch (err) {
           await deleteComputer(client, resolved.org, instance).catch((cleanup: Error) => {
@@ -886,7 +910,7 @@ export const boxd = defineProvider<BoxdInstance, BoxdConfig, unknown, Snapshot, 
         const client = clientFor(resolved);
         const machines = await client.machines.list({
           ...(resolved.org ? { org: resolved.org } : {}),
-          region: resolved.region ?? 'all',
+          region: resolved.pinned ?? 'all',
           labels: { ...LABEL },
         });
         machines.forEach(remember);
@@ -1121,7 +1145,7 @@ export const boxd = defineProvider<BoxdInstance, BoxdConfig, unknown, Snapshot, 
         const resolved = resolveConfig(config);
         const snapshots = await clientFor(resolved).snapshots.list({
           ...(resolved.org ? { org: resolved.org } : {}),
-          region: resolved.region ?? 'all',
+          region: resolved.pinned ?? 'all',
         });
         const instanceId = options?.instanceId ?? options?.sandboxId;
         const prefix = instanceId ? `${SNAPSHOT_PREFIX}${instanceId.slice(0, 8)}-` : undefined;
@@ -1162,13 +1186,13 @@ export const boxd = defineProvider<BoxdInstance, BoxdConfig, unknown, Snapshot, 
 
       get: async (config: BoxdConfig, volumeIdOrName: string): Promise<BoxdVolume | null> => {
         const resolved = resolveConfig(config);
-        const disk = await findDisk(clientFor(resolved), resolved.region, volumeIdOrName);
+        const disk = await findDisk(clientFor(resolved), resolved.pinned, volumeIdOrName);
         return disk ? toVolume(disk) : null;
       },
 
       list: async (config: BoxdConfig, options?: ListVolumesOptions): Promise<BoxdVolume[]> => {
         const resolved = resolveConfig(config);
-        const disks = await clientFor(resolved).disks.list({ region: resolved.region ?? 'all' });
+        const disks = await clientFor(resolved).disks.list({ region: resolved.pinned ?? 'all' });
         const all = disks.map(toVolume);
         return options?.limit ? all.slice(0, options.limit) : all;
       },
@@ -1176,7 +1200,7 @@ export const boxd = defineProvider<BoxdInstance, BoxdConfig, unknown, Snapshot, 
       delete: async (config: BoxdConfig, volumeIdOrName: string): Promise<void> => {
         const resolved = resolveConfig(config);
         const client = clientFor(resolved);
-        const disk = await findDisk(client, resolved.region, volumeIdOrName);
+        const disk = await findDisk(client, resolved.pinned, volumeIdOrName);
         if (!disk) return;
         try {
           await client.disks.delete(disk.id, regionOpt(disk.region));

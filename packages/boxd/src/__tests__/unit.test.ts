@@ -58,7 +58,7 @@ function machine(overrides: Record<string, unknown> = {}) {
     name: `computesdk-test-${seq}`,
     status: 'running',
     createdAt: new Date('2026-11-04T10:00:00Z'),
-    region: 'fra',
+    region: 'nyc',
     resources: { vcpu: 2 },
     org: { name: 'acme' },
     labels: { computesdk: 'true' },
@@ -69,7 +69,7 @@ function machine(overrides: Record<string, unknown> = {}) {
 }
 
 function disk(overrides: Record<string, unknown> = {}) {
-  return { id: 'd-1', name: 'cache', sizeBytes: 1024 ** 3, status: 'ready', createdAt: new Date(0), attachments: [], region: 'fra', ...overrides };
+  return { id: 'd-1', name: 'cache', sizeBytes: 1024 ** 3, status: 'ready', createdAt: new Date(0), attachments: [], region: 'nyc', ...overrides };
 }
 
 /** A listing across regions, as the SDK returns it. */
@@ -103,7 +103,7 @@ function fakeStream(opts: { stdout?: string[]; stderr?: string[]; exitCode?: num
 
 const ok = (stdout = '') => ({ stdout, stderr: '', exitCode: 0, success: true });
 const ready = () => new Response(null, { status: 204, headers: { 'x-boxd-proxy': 'ready' } });
-const notFound = () => new NotFoundError('VM not found (region fra)', 5);
+const notFound = () => new NotFoundError('VM not found (region nyc)', 5);
 const stopped = (name = 'computesdk-test') => new ConflictError(`VM ${name} is stopped, so it won't be resumed automatically`, 9);
 
 const provider = (config: Record<string, unknown> = {}) => boxd({ apiKey: 'bxd_test', org: 'acme', ...config });
@@ -142,12 +142,12 @@ describe('config', () => {
   it('reads the key, org and region from the environment', async () => {
     vi.stubEnv('BOXD_API_KEY', 'bxd_env');
     vi.stubEnv('BOXD_ORG', 'env-org');
-    vi.stubEnv('BOXD_REGION', 'nyc');
-    m.create.mockResolvedValueOnce(machine({ region: 'nyc' }));
-    m.waitUntilReady.mockResolvedValueOnce(machine({ region: 'nyc' }));
+    vi.stubEnv('BOXD_REGION', 'fra');
+    m.create.mockResolvedValueOnce(machine({ region: 'fra' }));
+    m.waitUntilReady.mockResolvedValueOnce(machine({ region: 'fra' }));
     await boxd({}).instances.create();
-    expect(clientOptions.at(-1)).toMatchObject({ apiKey: 'bxd_env', region: 'nyc' });
-    expect(m.create.mock.calls[0][0]).toMatchObject({ org: 'env-org', region: 'nyc' });
+    expect(clientOptions.at(-1)).toMatchObject({ apiKey: 'bxd_env', region: 'fra' });
+    expect(m.create.mock.calls[0][0]).toMatchObject({ org: 'env-org', region: 'fra' });
   });
 
   it('uses a key passed in over a BOXD_TOKEN in the environment', async () => {
@@ -172,6 +172,23 @@ describe('config', () => {
     expect(m.create.mock.calls[0][0].deleteAfter).toBe(60);
     expect(clientOptions.at(-1)).toMatchObject({ apiKey: 'bxd_lifetime', timeout: 5000 });
   });
+
+  it('creates in nyc unless a region is configured, and the config beats BOXD_REGION', async () => {
+    await created({}, {}, { apiKey: 'bxd_region' });
+    expect(clientOptions.at(-1)).toMatchObject({ apiKey: 'bxd_region', region: 'nyc' });
+    expect(m.create.mock.calls[0][0].region).toBe('nyc');
+    vi.stubEnv('BOXD_REGION', 'nyc');
+    await created({}, { region: 'fra' }, { apiKey: 'bxd_region', region: ' FRA ' });
+    expect(clientOptions.at(-1)).toMatchObject({ apiKey: 'bxd_region', region: 'fra' });
+    expect(m.create.mock.calls[1][0].region).toBe('fra');
+  });
+
+  it('leaves the region to a server of your own', async () => {
+    await created({}, {}, { apiKey: 'bxd_own_server', baseURL: 'https://boxd.dev.example:9443' });
+    expect(clientOptions.at(-1)).toMatchObject({ apiKey: 'bxd_own_server', baseURL: 'https://boxd.dev.example:9443' });
+    expect(clientOptions.at(-1)).not.toHaveProperty('region');
+    expect(m.create.mock.calls[0][0]).not.toHaveProperty('region');
+  });
 });
 
 describe('create', () => {
@@ -180,7 +197,7 @@ describe('create', () => {
     const params = m.create.mock.calls[0][0];
     expect(params).toMatchObject({ org: 'acme', isolated: true, labels: { computesdk: 'true' } });
     expect(params.name).toMatch(/^computesdk-[0-9a-f]{8}$/);
-    expect(m.waitUntilReady).toHaveBeenCalledWith(id, { region: 'fra' });
+    expect(m.waitUntilReady).toHaveBeenCalledWith(id, { region: 'nyc' });
     expect(sandbox.instanceId).toBe(id);
     expect(sandbox.provider).toBe('boxd');
   });
@@ -235,8 +252,8 @@ describe('create', () => {
   });
 
   it('passes autoSuspendTimeout and a per-call region', async () => {
-    await created({ region: 'nyc' }, { region: 'nyc' }, { autoSuspendTimeout: 300 });
-    expect(m.create.mock.calls[0][0]).toMatchObject({ region: 'nyc', config: { autoSuspendTimeout: 300 } });
+    await created({ region: 'fra' }, { region: 'fra' }, { autoSuspendTimeout: 300 });
+    expect(m.create.mock.calls[0][0]).toMatchObject({ region: 'fra', config: { autoSuspendTimeout: 300 } });
   });
 
   it('stores envs in the computer, readable by its user only', async () => {
@@ -260,7 +277,7 @@ describe('create', () => {
     m.waitUntilReady.mockRejectedValueOnce(new Error('not ready after 90s'));
     m.delete.mockResolvedValueOnce(undefined);
     await expect(provider().instances.create()).rejects.toThrow('not ready');
-    expect(m.delete).toHaveBeenCalledWith(mach.id, { region: 'fra' });
+    expect(m.delete).toHaveBeenCalledWith(mach.id, { region: 'nyc' });
   });
 
   it('names the computer it could not clean up after a failed create', async () => {
@@ -294,11 +311,21 @@ describe('lookup', () => {
 
   it('lists only computers with the computesdk label, in every region', async () => {
     const a = machine();
-    const b = machine({ region: 'nyc' });
+    const b = machine({ region: 'fra' });
     m.list.mockResolvedValueOnce(regional([a, b]));
     const all = await provider().instances.list();
     expect(m.list).toHaveBeenCalledWith({ org: 'acme', region: 'all', labels: { computesdk: 'true' } });
     expect(all.map((s) => s.instanceId)).toEqual([a.id, b.id]);
+  });
+
+  it('lists only the configured region when one is set', async () => {
+    snapshots.list.mockResolvedValueOnce(regional([]));
+    await provider({ region: 'fra' }).instances.list();
+    await provider({ region: 'fra' }).snapshot!.list();
+    await provider({ region: 'fra' }).volume!.list();
+    expect(m.list).toHaveBeenCalledWith({ org: 'acme', region: 'fra', labels: { computesdk: 'true' } });
+    expect(snapshots.list).toHaveBeenCalledWith({ org: 'acme', region: 'fra' });
+    expect(disks.list).toHaveBeenCalledWith({ region: 'fra' });
   });
 
   it('ignores a computer that is already gone on destroy', async () => {
@@ -316,7 +343,7 @@ describe('runCommand', () => {
     expect(m.exec).toHaveBeenCalledWith(id, {
       command: '[ -r /home/boxd/.computesdk/env ] && . /home/boxd/.computesdk/env; export B="two \\"q\\""; { echo $B\n}',
       cwd: '/tmp',
-      region: 'fra',
+      region: 'nyc',
     });
     expect(result).toMatchObject({ stdout: 'ok\n', exitCode: 0 });
   });
@@ -359,7 +386,7 @@ describe('runCommand', () => {
     m.exec.mockRejectedValueOnce(stopped()).mockResolvedValueOnce(ok('back\n'));
     m.waitUntilReady.mockResolvedValueOnce(machine());
     const result = await sandbox.runCommand('echo back');
-    expect(m.start).toHaveBeenCalledWith(id, { region: 'fra' });
+    expect(m.start).toHaveBeenCalledWith(id, { region: 'nyc' });
     expect(result.stdout).toBe('back\n');
   });
 });
@@ -437,7 +464,7 @@ describe('getInfo', () => {
     const info = await sandbox.getInfo();
     expect(info.status).toBe('running');
     expect(info.timeout).toBeGreaterThan(55_000);
-    expect(info.metadata).toMatchObject({ status: 'running', region: 'fra', org: 'acme', labels: { team: 'a' } });
+    expect(info.metadata).toMatchObject({ status: 'running', region: 'nyc', org: 'acme', labels: { team: 'a' } });
   });
 
   it('reports a failed computer as an error', async () => {
@@ -472,7 +499,7 @@ describe('getUrl', () => {
     proxies.list.mockResolvedValueOnce([]).mockResolvedValueOnce([route('p8080', 8080, 'p8080.computesdk-test.boxd.sh')]);
     proxies.create.mockResolvedValueOnce({ name: 'p8080', port: 8080 });
     expect(await sandbox.getUrl({ port: 8080, protocol: 'wss' })).toBe('wss://p8080.computesdk-test.boxd.sh');
-    expect(proxies.create).toHaveBeenCalledWith(id, 'p8080', 8080, { region: 'fra' });
+    expect(proxies.create).toHaveBeenCalledWith(id, 'p8080', 8080, { region: 'nyc' });
   });
 
   it('waits until the new URL answers', async () => {
@@ -529,7 +556,7 @@ describe('filesystem', () => {
     fs.read.mockResolvedValueOnce(new TextEncoder().encode('héllo'));
     expect(await sandbox.filesystem.readFile('/tmp/x')).toBe('héllo');
     await sandbox.filesystem.writeFile('/tmp/y', 'data');
-    expect(fs.write).toHaveBeenCalledWith(id, '/tmp/y', 'data', { region: 'fra' });
+    expect(fs.write).toHaveBeenCalledWith(id, '/tmp/y', 'data', { region: 'nyc' });
   });
 
   it('accepts mkdir of a directory that exists, and says whether a path exists', async () => {
@@ -568,13 +595,13 @@ describe('volumes', () => {
       .mockResolvedValueOnce(regional([disk({ id: 'd-new', status: 'creating' })]))
       .mockResolvedValueOnce(regional([disk({ id: 'd-new', attachments: [{ machineId: 'm-x', machineName: 'x', mountPath: '/data', mountMode: 'ro' }] })]));
     const volume = await provider().volume!.create({ name: 'cache' });
-    expect(disks.create).toHaveBeenCalledWith('cache', 10 * 1024 ** 3, {});
-    expect(volume).toMatchObject({ id: 'd-new', name: 'cache', status: 'ready', region: 'fra' });
+    expect(disks.create).toHaveBeenCalledWith('cache', 10 * 1024 ** 3, { region: 'nyc' });
+    expect(volume).toMatchObject({ id: 'd-new', name: 'cache', status: 'ready', region: 'nyc' });
     expect(volume.attachments).toEqual([{ instanceId: 'm-x', name: 'x', mountPath: '/data', readOnly: true }]);
   });
 
   it('finds a volume by name in every region, and returns null when there is none', async () => {
-    disks.list.mockResolvedValueOnce(regional([disk({ region: 'nyc' })])).mockResolvedValueOnce(regional([]));
+    disks.list.mockResolvedValueOnce(regional([disk({ region: 'fra' })])).mockResolvedValueOnce(regional([]));
     expect((await provider().volume!.get('cache'))?.id).toBe('d-1');
     expect(disks.list).toHaveBeenCalledWith({ region: 'all' });
     expect(await provider().volume!.get('nothing')).toBeNull();
@@ -586,9 +613,9 @@ describe('volumes', () => {
   });
 
   it('deletes a volume by name, and ignores one that is gone', async () => {
-    disks.list.mockResolvedValueOnce(regional([disk({ region: 'nyc' })])).mockResolvedValueOnce(regional([]));
+    disks.list.mockResolvedValueOnce(regional([disk({ region: 'fra' })])).mockResolvedValueOnce(regional([]));
     await provider().volume!.delete('cache');
-    expect(disks.delete).toHaveBeenCalledWith('d-1', { region: 'nyc' });
+    expect(disks.delete).toHaveBeenCalledWith('d-1', { region: 'fra' });
     await provider().volume!.delete('gone');
     expect(disks.delete).toHaveBeenCalledTimes(1);
   });
@@ -598,11 +625,11 @@ describe('volumes', () => {
   const attachedHere = (id: string, mountPath = '/data', mountMode = 'rw') => [{ machineId: id, machineName: 'x', mountPath, mountMode }];
   const freezes = (path: string) => `for p in '${path}'; do mountpoint -q "$p" && sudo -n fsfreeze -f "$p"; done`;
 
-  it('mounts volumes at create, in the region of their disks, and checks they mounted', async () => {
-    disks.list.mockResolvedValueOnce(regional([disk({ region: 'nyc' })]));
+  it('mounts volumes at create, in the region of their disks rather than the default, and checks they mounted', async () => {
+    disks.list.mockResolvedValueOnce(regional([disk({ region: 'fra' })]));
     m.exec.mockResolvedValueOnce(ok(''));
-    await created({ volumes: [{ volume: 'cache', mountPath: '/data', readOnly: true }] }, { region: 'nyc' });
-    expect(m.create.mock.calls[0][0]).toMatchObject({ region: 'nyc', config: { volumes: [{ diskId: 'd-1', mountPath: '/data', readOnly: true }] } });
+    await created({ volumes: [{ volume: 'cache', mountPath: '/data', readOnly: true }] }, { region: 'fra' });
+    expect(m.create.mock.calls[0][0]).toMatchObject({ region: 'fra', config: { volumes: [{ diskId: 'd-1', mountPath: '/data', readOnly: true }] } });
     expect(m.exec.mock.calls[0][1].command).toBe(`for p in '/data'; do mountpoint -q "$p" || echo "$p"; done`);
   });
 
@@ -617,23 +644,28 @@ describe('volumes', () => {
       .catch((e: unknown) => e)) as Error;
     expect(err.message).toMatch(/didn't mount \/data: a read-only mount fails .* Mount it read-write once/);
     expect(err.message).not.toMatch(RETRIED);
-    expect(m.delete).toHaveBeenCalledWith(mach.id, { region: 'fra' });
+    expect(m.delete).toHaveBeenCalledWith(mach.id, { region: 'nyc' });
   });
 
-  it('passes boxd volume mounts through as they are', async () => {
-    m.exec.mockResolvedValueOnce(ok(''));
-    await created({ volumes: [{ diskId: 'd-9', mountPath: '/data' }] });
-    expect(m.create.mock.calls[0][0].config).toEqual({ volumes: [{ diskId: 'd-9', mountPath: '/data', readOnly: false }] });
-    expect(disks.list).not.toHaveBeenCalled();
+  it("passes boxd's own volume mounts through, in their disk's region", async () => {
+    disks.list.mockResolvedValueOnce(regional([disk({ id: 'd-9', region: 'fra' })]));
+    m.exec.mockResolvedValueOnce(ok('')).mockResolvedValueOnce(ok(''));
+    await created({ volumes: [{ diskId: 'd-9', mountPath: '/data' }] }, { region: 'fra' });
+    expect(disks.list).toHaveBeenCalledWith({ region: 'all' });
+    expect(m.create.mock.calls[0][0]).toMatchObject({ region: 'fra', config: { volumes: [{ diskId: 'd-9', mountPath: '/data', readOnly: false }] } });
+    // A region asked for is used as it is, without a lookup.
+    await created({ region: 'nyc', volumes: [{ diskId: 'd-10', mountPath: '/data' }] });
+    expect(disks.list).toHaveBeenCalledTimes(1);
+    expect(m.create.mock.calls[1][0]).toMatchObject({ region: 'nyc', config: { volumes: [{ diskId: 'd-10', mountPath: '/data', readOnly: false }] } });
   });
 
   it('refuses volumes from two regions, or from another region than asked', async () => {
-    disks.list.mockResolvedValueOnce(regional([disk(), disk({ id: 'd-2', name: 'b', region: 'nyc' })]));
+    disks.list.mockResolvedValueOnce(regional([disk(), disk({ id: 'd-2', name: 'b', region: 'fra' })]));
     await expect(
       provider().instances.create({ volumes: [{ volume: 'cache', mountPath: '/a' }, { volume: 'b', mountPath: '/b' }] }),
     ).rejects.toThrow(/one region/);
-    disks.list.mockResolvedValueOnce(regional([disk({ region: 'nyc' })]));
-    await expect(provider().instances.create({ region: 'fra', volumes: [{ volume: 'cache', mountPath: '/a' }] })).rejects.toThrow(/created there/);
+    disks.list.mockResolvedValueOnce(regional([disk({ region: 'fra' })]));
+    await expect(provider().instances.create({ region: 'nyc', volumes: [{ volume: 'cache', mountPath: '/a' }] })).rejects.toThrow(/created there/);
     expect(m.create).not.toHaveBeenCalled();
   });
 
@@ -644,9 +676,9 @@ describe('volumes', () => {
     m.exec.mockResolvedValueOnce(ok()).mockResolvedValueOnce(ok(''));
     m.waitUntilReady.mockResolvedValueOnce(machine());
     await sandbox.attachVolume!('cache', '/mnt/cache');
-    expect(disks.attach).toHaveBeenCalledWith('d-1', id, '/mnt/cache', { region: 'fra' });
-    expect(m.stop).toHaveBeenCalledWith(id, { region: 'fra' });
-    expect(m.start).toHaveBeenCalledWith(id, { region: 'fra' });
+    expect(disks.attach).toHaveBeenCalledWith('d-1', id, '/mnt/cache', { region: 'nyc' });
+    expect(m.stop).toHaveBeenCalledWith(id, { region: 'nyc' });
+    expect(m.start).toHaveBeenCalledWith(id, { region: 'nyc' });
     expect(m.exec.mock.calls[1][1].command).toContain('mountpoint -q');
   });
 
@@ -726,7 +758,7 @@ describe('volumes', () => {
     disks.list.mockResolvedValueOnce(regional([disk({ attachments: attachedHere(id) })]));
     m.exec.mockResolvedValueOnce(ok());
     await sandbox.destroy();
-    expect(m.exec.mock.calls[1]).toEqual([id, { command: freezes('/data'), timeout: 30_000, region: 'fra' }]);
+    expect(m.exec.mock.calls[1]).toEqual([id, { command: freezes('/data'), timeout: 30_000, region: 'nyc' }]);
     expect(m.exec.mock.invocationCallOrder[1]).toBeLessThan(m.stop.mock.invocationCallOrder[0]);
     expect(m.stop.mock.invocationCallOrder[0]).toBeLessThan(m.delete.mock.invocationCallOrder[0]);
   });
@@ -734,16 +766,16 @@ describe('volumes', () => {
   it('checks for volumes before deleting a computer it did not create', async () => {
     disks.list.mockResolvedValueOnce(regional([disk({ attachments: attachedHere('old-vol', '/d') })]));
     await provider().instances.destroy('old-vol');
-    expect(m.exec).toHaveBeenCalledWith('old-vol', { command: freezes('/d'), timeout: 30_000 });
-    expect(m.stop).toHaveBeenCalledWith('old-vol', {});
-    expect(m.delete).toHaveBeenCalledWith('old-vol', {});
+    expect(m.exec).toHaveBeenCalledWith('old-vol', { command: freezes('/d'), timeout: 30_000, region: 'nyc' });
+    expect(m.stop).toHaveBeenCalledWith('old-vol', { region: 'nyc' });
+    expect(m.delete).toHaveBeenCalledWith('old-vol', { region: 'nyc' });
   });
 
   it('only stops a computer whose disk is mounted read-only', async () => {
     disks.list.mockResolvedValueOnce(regional([disk({ attachments: attachedHere('old-ro', '/d', 'ro') })]));
     await provider().instances.destroy('old-ro');
     expect(m.exec).not.toHaveBeenCalled();
-    expect(m.stop).toHaveBeenCalledWith('old-ro', {});
+    expect(m.stop).toHaveBeenCalledWith('old-ro', { region: 'nyc' });
   });
 
   it('deletes a computer created without volumes at once', async () => {
@@ -759,25 +791,25 @@ describe('volumes', () => {
 describe('regions and "not found"', () => {
   it('destroys a computer in another region, found by id', async () => {
     m.delete.mockRejectedValueOnce(notFound()).mockResolvedValueOnce(undefined);
-    m.list.mockResolvedValueOnce(regional([machine({ id: 'nyc-1', region: 'nyc' })]));
-    await provider().instances.destroy('nyc-1');
+    m.list.mockResolvedValueOnce(regional([machine({ id: 'fra-1', region: 'fra' })]));
+    await provider().instances.destroy('fra-1');
     expect(m.list).toHaveBeenCalledWith({ org: 'acme', region: 'all' });
-    expect(m.delete).toHaveBeenNthCalledWith(1, 'nyc-1', {});
-    expect(m.delete).toHaveBeenNthCalledWith(2, 'nyc-1', { region: 'nyc' });
+    expect(m.delete).toHaveBeenNthCalledWith(1, 'fra-1', { region: 'nyc' });
+    expect(m.delete).toHaveBeenNthCalledWith(2, 'fra-1', { region: 'fra' });
   });
 
   it('gets a computer in another region, found by id', async () => {
-    m.get.mockRejectedValueOnce(notFound()).mockResolvedValueOnce(machine({ id: 'nyc-2', region: 'nyc' }));
-    m.list.mockResolvedValueOnce(regional([machine({ id: 'nyc-2', region: 'nyc' })]));
-    const found = await provider().instances.getById('nyc-2');
-    expect(found?.getInstance().region).toBe('nyc');
-    expect(m.get).toHaveBeenLastCalledWith('nyc-2', { region: 'nyc' });
+    m.get.mockRejectedValueOnce(notFound()).mockResolvedValueOnce(machine({ id: 'fra-2', region: 'fra' }));
+    m.list.mockResolvedValueOnce(regional([machine({ id: 'fra-2', region: 'fra' })]));
+    const found = await provider().instances.getById('fra-2');
+    expect(found?.getInstance().region).toBe('fra');
+    expect(m.get).toHaveBeenLastCalledWith('fra-2', { region: 'fra' });
   });
 
   it("doesn't believe a computer is gone while a region can't be listed", async () => {
     m.delete.mockRejectedValueOnce(notFound());
-    m.list.mockResolvedValueOnce(regional([], ['nyc']));
-    await expect(provider().instances.destroy('maybe-1')).rejects.toThrow(/couldn't list region nyc/);
+    m.list.mockResolvedValueOnce(regional([], ['fra']));
+    await expect(provider().instances.destroy('maybe-1')).rejects.toThrow(/couldn't list region fra/);
   });
 
   it('retries a call while the listing still shows the computer', async () => {
@@ -813,19 +845,28 @@ describe('regions and "not found"', () => {
   });
 
   it('creates from a snapshot kept in another region', async () => {
-    m.create.mockRejectedValueOnce(new NotFoundError('snapshot not found', 5)).mockResolvedValueOnce(machine({ id: 'r-1', region: 'nyc' }));
-    snapshots.list.mockResolvedValueOnce(regional([{ id: 'snap-nyc', name: 'golden', region: 'nyc' }]));
-    m.waitUntilReady.mockResolvedValueOnce(machine({ id: 'r-1', region: 'nyc' }));
-    await provider().instances.create({ snapshotId: 'snap-nyc' });
+    m.create.mockRejectedValueOnce(new NotFoundError('snapshot not found', 5)).mockResolvedValueOnce(machine({ id: 'r-1', region: 'fra' }));
+    snapshots.list.mockResolvedValueOnce(regional([{ id: 'snap-fra', name: 'golden', region: 'fra' }]));
+    m.waitUntilReady.mockResolvedValueOnce(machine({ id: 'r-1', region: 'fra' }));
+    await provider().instances.create({ snapshotId: 'snap-fra' });
+    expect(m.create.mock.calls[0][0]).toMatchObject({ fromSnapshot: 'snap-fra', region: 'nyc' });
     expect(snapshots.list).toHaveBeenCalledWith({ org: 'acme', region: 'all' });
-    expect(m.create.mock.calls[1][0]).toMatchObject({ fromSnapshot: 'snap-nyc', region: 'nyc' });
+    expect(m.create.mock.calls[1][0]).toMatchObject({ fromSnapshot: 'snap-fra', region: 'fra' });
+  });
+
+  it('keeps a configured region for a snapshot kept in another one', async () => {
+    m.create.mockRejectedValueOnce(new NotFoundError('snapshot not found', 5));
+    await expect(provider({ region: 'nyc' }).instances.create({ snapshotId: 'snap-fra' })).rejects.toThrow('snapshot not found');
+    expect(snapshots.list).not.toHaveBeenCalled();
+    expect(m.create).toHaveBeenCalledTimes(1);
   });
 
   it('deletes a snapshot kept in another region', async () => {
     snapshots.delete.mockRejectedValueOnce(new NotFoundError('snapshot not found', 5)).mockResolvedValueOnce(undefined);
-    snapshots.list.mockResolvedValueOnce(regional([{ id: 'snap-nyc', name: 'golden', region: 'nyc' }]));
-    await provider().snapshot!.delete('snap-nyc');
-    expect(snapshots.delete).toHaveBeenLastCalledWith('snap-nyc', { org: 'acme', region: 'nyc' });
+    snapshots.list.mockResolvedValueOnce(regional([{ id: 'snap-fra', name: 'golden', region: 'fra' }]));
+    await provider().snapshot!.delete('snap-fra');
+    expect(snapshots.delete).toHaveBeenNthCalledWith(1, 'snap-fra', { org: 'acme', region: 'nyc' });
+    expect(snapshots.delete).toHaveBeenLastCalledWith('snap-fra', { org: 'acme', region: 'fra' });
   });
 });
 
@@ -836,7 +877,7 @@ describe('snapshots', () => {
       .mockResolvedValueOnce({ id: 'snap-1', name: 'golden', version: 1, status: 'ready' })
       .mockResolvedValueOnce({ id: 'snap-1', name: 'golden', version: 2, status: 'ready', createdAt: new Date(0), sizeBytes: 10 });
     const snapshot = await provider().snapshot!.create('m-snap', { name: 'golden' });
-    expect(snapshots.create).toHaveBeenCalledWith('m-snap', 'golden', {});
+    expect(snapshots.create).toHaveBeenCalledWith('m-snap', 'golden', { region: 'nyc' });
     expect(snapshots.get).toHaveBeenCalledTimes(2);
     expect(snapshot).toMatchObject({ id: 'snap-1', provider: 'boxd', metadata: { version: 2 } });
   });
