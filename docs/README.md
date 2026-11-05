@@ -32,6 +32,7 @@ Providers are platforms that provide sandboxes. Each package under `@computesdk/
 | `@computesdk/aws/agentcore`    | AWS Bedrock AgentCore |
 | `@computesdk/beam`             | Beam         |
 | `@computesdk/blaxel`           | Blaxel       |
+| `@computesdk/boxd`             | boxd         |
 | `@computesdk/buddy`            | Buddy        |
 | `@computesdk/gcp/cloud-run`    | Cloud Run    |
 | `@computesdk/cloudflare`       | Cloudflare   |

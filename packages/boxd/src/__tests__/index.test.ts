@@ -6,5 +6,6 @@ runProviderTestSuite({
   provider: boxd({}),
   supportsFilesystem: true,
   supportsStreaming: true,
-  skipIntegration: !process.env.BOXD_API_KEY,
+  supportsProcesses: true,
+  skipIntegration: !(process.env.BOXD_API_KEY || process.env.BOXD_TOKEN),
 });

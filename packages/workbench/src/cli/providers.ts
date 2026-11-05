@@ -32,6 +32,7 @@ const SHARED_PROVIDER_NAMES = [
   'tenki',
   'microsandbox',
   'novita',
+  'boxd',
 ] as const;
 
 type SharedProviderName = typeof SHARED_PROVIDER_NAMES[number];
@@ -39,6 +40,8 @@ type SharedProviderName = typeof SHARED_PROVIDER_NAMES[number];
 const SHARED_PROVIDER_AUTH: Record<SharedProviderName, readonly (readonly string[])[]> = {
   e2b: [['E2B_API_KEY']],
   novita: [['NOVITA_API_KEY']],
+  // An API key, or a boxd session token.
+  boxd: [['BOXD_API_KEY'], ['BOXD_TOKEN']],
   daytona: [['DAYTONA_API_KEY']],
   modal: [['MODAL_TOKEN_ID', 'MODAL_TOKEN_SECRET']],
   runloop: [['RUNLOOP_API_KEY']],
@@ -80,6 +83,7 @@ const SHARED_PROVIDER_AUTH: Record<SharedProviderName, readonly (readonly string
 const PROVIDER_ENV_MAP: Record<SharedProviderName, Record<string, string | readonly string[]>> = {
   e2b: { apiKey: 'E2B_API_KEY' },
   novita: { apiKey: 'NOVITA_API_KEY' },
+  boxd: { apiKey: 'BOXD_API_KEY', token: 'BOXD_TOKEN', org: 'BOXD_ORG', region: 'BOXD_REGION', baseURL: 'BOXD_BASE_URL' },
   daytona: { apiKey: 'DAYTONA_API_KEY' },
   modal: { tokenId: 'MODAL_TOKEN_ID', tokenSecret: 'MODAL_TOKEN_SECRET' },
   runloop: { apiKey: 'RUNLOOP_API_KEY' },
@@ -363,6 +367,8 @@ export async function loadProvider(providerName: ProviderName): Promise<any> {
         return await import('@computesdk/e2b');
       case 'novita':
         return await import('@computesdk/novita');
+      case 'boxd':
+        return await import('@computesdk/boxd');
       case 'daytona':
         return await import('@computesdk/daytona');
       case 'modal':

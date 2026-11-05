@@ -107,6 +107,16 @@ const providerDefinitions: Record<string, ProviderDefinition> = {
       }),
     isConfigured: () => Boolean(env('BL_API_KEY') && env('BL_WORKSPACE')),
   },
+  boxd: {
+    config: () =>
+      envConfig({
+        apiKey: env('BOXD_API_KEY'),
+        token: env('BOXD_TOKEN'),
+        org: env('BOXD_ORG'),
+        region: env('BOXD_REGION'),
+      }),
+    isConfigured: () => hasAnyEnv('BOXD_API_KEY', 'BOXD_TOKEN'),
+  },
   'cloud-run': {
     config: () =>
       envConfig({
@@ -445,6 +455,7 @@ async function loadProviderFactory(
     arker: 'arker',
     beam: 'beam',
     blaxel: 'blaxel',
+    boxd: 'boxd',
     'cloud-run': 'cloudRun',
     cloudflare: 'cloudflare',
     codesandbox: 'codesandbox',

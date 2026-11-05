@@ -14,6 +14,32 @@ describe('Novita Workbench configuration', () => {
   });
 });
 
+describe('boxd Workbench configuration', () => {
+  afterEach(() => { vi.unstubAllEnvs(); });
+
+  it('takes an API key with its org and region', () => {
+    vi.stubEnv('BOXD_API_KEY', 'bxd_test');
+    vi.stubEnv('BOXD_TOKEN', '');
+    vi.stubEnv('BOXD_ORG', 'acme');
+    vi.stubEnv('BOXD_REGION', 'nyc');
+    vi.stubEnv('BOXD_BASE_URL', '');
+    expect(getProviderStatus('boxd')).toMatchObject({ isComplete: true, missing: [] });
+    expect(getProviderConfig('boxd')).toEqual({ apiKey: 'bxd_test', org: 'acme', region: 'nyc' });
+  });
+
+  it('takes a session token instead of a key', () => {
+    vi.stubEnv('BOXD_API_KEY', '');
+    vi.stubEnv('BOXD_TOKEN', 'session-test');
+    expect(getProviderStatus('boxd')).toMatchObject({ isComplete: true, missing: [] });
+  });
+
+  it('asks for BOXD_API_KEY when neither is set', () => {
+    vi.stubEnv('BOXD_API_KEY', '');
+    vi.stubEnv('BOXD_TOKEN', '');
+    expect(getProviderStatus('boxd')).toMatchObject({ isComplete: false, missing: ['BOXD_API_KEY'] });
+  });
+});
+
 describe('microsandbox Workbench configuration', () => {
   afterEach(() => {
     vi.unstubAllEnvs();
